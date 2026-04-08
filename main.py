@@ -91,24 +91,61 @@ async def get_detail_batch(items: str):
 
 @app.get("/api/search")
 async def search_corp(corp_name: str, bgn_de: str, end_de: str):
+    # 먼저 corp_code 조회 (전체기간 검색을 위해 필요)
+    corp_code = None
     async with httpx.AsyncClient(timeout=20) as client:
-        tasks = [
-            client.get(f"{DART_BASE}/list.json", params={
-                "crtfc_key": DART_KEY, "bgn_de": bgn_de, "end_de": end_de,
-                "pblntf_detail_ty": ty, "page_count": 100,
-                "sort": "date", "sort_mth": "desc"
-            }) for ty in ["D002", "D001"]
-        ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # 회사명으로 corp_code 조회
+        r = await client.get(f"{DART_BASE}/company.json", params={
+            "crtfc_key": DART_KEY, "corp_name": corp_name
+        })
+        corp_data = r.json()
+        corp_list = corp_data.get("list", [])
+        # 종목코드 일치 우선, 없으면 이름 포함 첫번째
+        for c in corp_list:
+            if c.get("stock_code") == corp_name:
+                corp_code = c.get("corp_code")
+                break
+        if not corp_code:
+            for c in corp_list:
+                if corp_name in c.get("corp_name", ""):
+                    corp_code = c.get("corp_code")
+                    break
 
     all_items = []
+    async with httpx.AsyncClient(timeout=30) as client:
+        if corp_code:
+            # corp_code 있으면 전체기간 조회 가능
+            tasks = [
+                client.get(f"{DART_BASE}/list.json", params={
+                    "crtfc_key": DART_KEY,
+                    "corp_code": corp_code,
+                    "bgn_de": bgn_de, "end_de": end_de,
+                    "pblntf_detail_ty": ty, "page_count": 100,
+                    "sort": "date", "sort_mth": "desc"
+                }) for ty in ["D002", "D001"]
+            ]
+        else:
+            # corp_code 없으면 3개월 제한
+            tasks = [
+                client.get(f"{DART_BASE}/list.json", params={
+                    "crtfc_key": DART_KEY,
+                    "bgn_de": bgn_de, "end_de": end_de,
+                    "pblntf_detail_ty": ty, "page_count": 100,
+                    "sort": "date", "sort_mth": "desc"
+                }) for ty in ["D002", "D001"]
+            ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
     for i, res in enumerate(results):
         ty = ["D002", "D001"][i]
         if isinstance(res, Exception):
             continue
         data = res.json()
         items = data.get("list", [])
-        filtered = [x for x in items if corp_name in x.get("corp_name", "") or corp_name == x.get("stock_code", "")]
-        all_items.extend([{**x, "_ty": ty} for x in filtered])
+        if corp_code:
+            all_items.extend([{**x, "_ty": ty} for x in items])
+        else:
+            filtered = [x for x in items if corp_name in x.get("corp_name", "") or corp_name == x.get("stock_code", "")]
+            all_items.extend([{**x, "_ty": ty} for x in filtered])
 
     return {"list": sorted(all_items, key=lambda x: x.get("rcept_dt", ""), reverse=True)}
