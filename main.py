@@ -91,56 +91,57 @@ async def get_detail_batch(items: str):
 
 @app.get("/api/search")
 async def search_corp(corp_name: str, bgn_de: str, end_de: str):
-    # 1단계: corp_name 파라미터로 1건 조회해서 corp_code 추출
-    corp_code = None
-    async with httpx.AsyncClient(timeout=20) as client:
-        for ty in ["D002", "D001"]:
-            r = await client.get(f"{DART_BASE}/list.json", params={
-                "crtfc_key": DART_KEY,
-                "bgn_de": "20100101", "end_de": end_de,
-                "pblntf_detail_ty": ty,
-                "corp_name": corp_name,
-                "page_count": 1
-            })
-            data = r.json()
-            items = data.get("list", [])
-            if items:
-                # stock_code 일치 우선
-                for item in items:
-                    if item.get("stock_code") == corp_name:
-                        corp_code = item.get("corp_code")
-                        break
-                if not corp_code:
-                    corp_code = items[0].get("corp_code")
-                break
+    from datetime import datetime, timedelta
 
-    if not corp_code:
-        return {"list": []}
-
-    # 2단계: corp_code로 전체기간 D002, D001 조회
+    # 날짜를 3개월씩 나눠서 조회 후 종목명/종목코드로 필터링
     all_items = []
-    async with httpx.AsyncClient(timeout=30) as client:
-        for ty in ["D002", "D001"]:
-            page = 1
-            while True:
-                r = await client.get(f"{DART_BASE}/list.json", params={
-                    "crtfc_key": DART_KEY,
-                    "corp_code": corp_code,
-                    "bgn_de": bgn_de, "end_de": end_de,
-                    "pblntf_detail_ty": ty,
-                    "page_count": 100,
-                    "page_no": page,
-                    "sort": "date", "sort_mth": "desc"
-                })
-                data = r.json()
-                items = data.get("list", [])
-                if not items:
-                    break
-                all_items.extend([{**x, "_ty": ty} for x in items])
-                if page >= data.get("total_page", 1):
-                    break
-                page += 1
-                if page > 10:  # 최대 1000건
-                    break
 
-    return {"list": sorted(all_items, key=lambda x: x.get("rcept_dt", ""), reverse=True)}
+    try:
+        start = datetime.strptime(bgn_de, "%Y%m%d")
+        end = datetime.strptime(end_de, "%Y%m%d")
+    except:
+        start = datetime(2020, 1, 1)
+        end = datetime.now()
+
+    # 3개월 단위로 나눔 (최근 2년치만 - 너무 많으면 느림)
+    two_years_ago = end - timedelta(days=730)
+    if start < two_years_ago:
+        start = two_years_ago
+
+    periods = []
+    cur = start
+    while cur < end:
+        period_end = min(cur + timedelta(days=89), end)
+        periods.append((cur.strftime("%Y%m%d"), period_end.strftime("%Y%m%d")))
+        cur = period_end + timedelta(days=1)
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        for bgn, end_p in periods:
+            for ty in ["D002", "D001"]:
+                try:
+                    r = await client.get(f"{DART_BASE}/list.json", params={
+                        "crtfc_key": DART_KEY,
+                        "bgn_de": bgn, "end_de": end_p,
+                        "pblntf_detail_ty": ty,
+                        "page_count": 100,
+                        "sort": "date", "sort_mth": "desc"
+                    })
+                    data = r.json()
+                    items = data.get("list", [])
+                    filtered = [
+                        {**x, "_ty": ty} for x in items
+                        if corp_name in x.get("corp_name", "") or corp_name == x.get("stock_code", "")
+                    ]
+                    all_items.extend(filtered)
+                except:
+                    continue
+
+    # 중복 제거
+    seen = set()
+    unique = []
+    for item in all_items:
+        if item["rcept_no"] not in seen:
+            seen.add(item["rcept_no"])
+            unique.append(item)
+
+    return {"list": sorted(unique, key=lambda x: x.get("rcept_dt", ""), reverse=True)}
